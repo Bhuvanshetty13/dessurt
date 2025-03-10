@@ -20,7 +20,7 @@ def main(resume, config, img_path, addToConfig=None, gpu=False, do_pad=None, sca
     torch.manual_seed(1234)
     no_mask_qs = ['fli:', 'fna:', 're~', 'l~', 'v~', 'mm~', 'mk>', 'natural_q~', 'json>', 'json~', 'linkdown-text~', 'read_block>']
     remove_qs = ['rm>', 'mlm>', 'mm~', 'mk>']
-    
+
     # Load checkpoint
     checkpoint = torch.load(resume, map_location=lambda storage, loc: storage)
     config = checkpoint['config']
@@ -59,7 +59,7 @@ def main(resume, config, img_path, addToConfig=None, gpu=False, do_pad=None, sca
     do_pad = config['model']['image_size']
     if isinstance(do_pad, int):
         do_pad = (do_pad, do_pad)
-    
+
     if img.shape[0] != do_pad[0] or img.shape[1] != do_pad[1]:
         diff_x = do_pad[1] - img.shape[1]
         diff_y = do_pad[0] - img.shape[0]
@@ -88,3 +88,6 @@ def main(resume, config, img_path, addToConfig=None, gpu=False, do_pad=None, sca
     with torch.no_grad():
         answer, _ = model(in_img, [[question]], RUN=True)
         print('\nExtracted Invoice Data:', answer)
+
+if __name__ == '__main__':
+    pass  # This block is not needed anymore (handled by your main script)
