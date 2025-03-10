@@ -45,40 +45,39 @@ def main(resume, config, img_path, addToConfig=None, gpu=False, do_pad=None, sca
 
     # Image preprocessing
     img = img_f.imread(img_path, False)
+    if img is None:
+        raise ValueError(f"Failed to load image at {img_path}")
+    
     if img.max() <= 1:
         img *= 255
 
+    # Handle grayscale images
+    if len(img.shape) == 2:
+        img = np.stack([img] * 3, axis=-1)  # Convert to 3-channel grayscale
+
     # Resize/pad image
     do_pad = config['model']['image_size']
-    if type(do_pad) is int:
+    if isinstance(do_pad, int):
         do_pad = (do_pad, do_pad)
+    
     if img.shape[0] != do_pad[0] or img.shape[1] != do_pad[1]:
         diff_x = do_pad[1] - img.shape[1]
         diff_y = do_pad[0] - img.shape[0]
-        p_img = np.zeros(do_pad, dtype=img.dtype)
-        if diff_x >= 0 and diff_y >= 0:
-            p_img[diff_y // 2:p_img.shape[0] - (diff_y // 2 + diff_y % 2),
-                  diff_x // 2:p_img.shape[1] - (diff_x // 2 + diff_x % 2)] = img
-        else:
-            p_img = img[(-diff_y) // 2:-((-diff_y) // 2 + (-diff_y) % 2),
-                        (-diff_x) // 2:-((-diff_x) // 2 + (-diff_x) % 2)]
+        p_img = np.zeros((do_pad[0], do_pad[1], 3), dtype=np.uint8)  # Ensure 3 channels
+        p_img[
+            diff_y // 2: diff_y // 2 + img.shape[0],
+            diff_x // 2: diff_x // 2 + img.shape[1]
+        ] = img
         img = p_img
 
     # Convert to tensor
-    img = img.transpose([2, 0, 1])[None, ...]
+    img = img.transpose([2, 0, 1])[None, ...]  # Shape: (1, C, H, W)
     img = 1.0 - torch.from_numpy(img.astype(np.float32)) / 128.0
     if gpu:
         img = img.cuda()
 
     # Use default query (json>) to extract invoice data
     question = default_task_token
-
-    # Process the query once (no user interaction)
-    needs_input_mask = True
-    for q in no_mask_qs:
-        if question.startswith(q):
-            needs_input_mask = False
-            break
 
     # Create dummy masks (no user interaction)
     mask = torch.zeros_like(img)
@@ -87,5 +86,5 @@ def main(resume, config, img_path, addToConfig=None, gpu=False, do_pad=None, sca
 
     # Run inference
     with torch.no_grad():
-        answer, pred_mask = model(in_img, [[question]], RUN=True)
-        print('\nExtracted Invoice Data:', answer)  # Explicitly print the result
+        answer, _ = model(in_img, [[question]], RUN=True)
+        print('\nExtracted Invoice Data:', answer)
