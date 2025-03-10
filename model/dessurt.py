@@ -477,6 +477,18 @@ class Dessurt(BaseModel):
                 num_beams = int(RUN[4:])
             else:
                 beam_search = False
+                response_discrete_token = response_decoded.argmax(dim=2)
+                output_tokens = [response_discrete_token[0,0].item()]
+            offset = 1
+            max_iterations = 1000  # Set maximum allowed iterations
+            iteration = 0
+
+            while (beam_search or output_tokens[-1] != self.SEP_TOKEN) and offset < max_pred_len:
+                iteration += 1
+                if iteration > max_iterations:
+                    print("WARNING: Maximum iteration count reached. Terminating decoding loop.")
+                    break
+
 
             if beam_search:
                 num_tokens = response_decoded.size(2)
@@ -520,49 +532,46 @@ class Dessurt(BaseModel):
                 #embed last predicted token
                 ans = self.text_embedding(response_discrete_token)
                 if self.a_pos_1d_enc is None:
-                    ans += self.pos_enc_adapter(self.pos_1d_enc(ans.size(),past_key_values_length=num_q+offset))
+                    ans += self.pos_enc_adapter(self.pos_1d_enc(ans.size(), past_key_values_length=num_q+offset))
                 else:
-                    ans = self.a_pos_1d_enc(ans,offset=offset)
+                    ans = self.a_pos_1d_enc(ans, offset=offset)
                 num_a += 1
 
-
-
-                level=0
-                for li,(swin_layer, proj_d2i, layout_layer, proj_i2d, im_downsample) in enumerate(self.swin_layers):
-
-                    #could be run in parallel
+                # Process through saved layers (example for one layer; actual code loops through layers)
+                level = 0
+                for li, (swin_layer, proj_d2i, layout_layer, proj_i2d, im_downsample) in enumerate(self.swin_layers):
+                    # Retrieve saved tokens for this layer
                     num_im = saved_proj_im_tokens[li].size(1)
                     num_q = saved_q_tokens[li].size(1)
-
-                    proj_im_tokens = saved_proj_im_tokens[li] #saved visual tokens for layer
-                    im_padding_mask = zero.expand(new_batch_size,num_im)
-
-                    q_tokens = saved_q_tokens[li] #saved query tokens for layer
+                    proj_im_tokens = saved_proj_im_tokens[li]
+                    im_padding_mask = torch.zeros(new_batch_size, num_im, device=device).bool()
+                    q_tokens = saved_q_tokens[li]
                     q_padding_mask = saved_q_padding_mask[li]
+                    a_tokens = saved_a_tokens[li] = torch.cat((saved_a_tokens[li], ans), dim=1)
+                    a_padding_mask = torch.zeros(new_batch_size, num_a, device=device).bool()
 
-                    a_tokens = saved_a_tokens[li] = torch.cat((saved_a_tokens[li],ans),dim=1) #append last predicted response token to saved previous response tokens
-                    a_padding_mask = zero.expand(new_batch_size,num_a)#holder_a_padding_mask[:,:num_a]
-
-                    all_padding_mask = torch.cat( (im_padding_mask,q_padding_mask,a_padding_mask), dim=1)
-                    all_att_mask = one.expand(new_batch_size,1,num_im+num_q+num_a)
-
+                    all_padding_mask = torch.cat((im_padding_mask, q_padding_mask, a_padding_mask), dim=1)
+                    all_att_mask = torch.ones(new_batch_size, 1, num_im+num_q+num_a, device=device)
                     #predict next token
+                    # Predict next token using the layout (autoregressive) layer
                     ans = layout_layer(
-                            a_tokens[:,-1:], #only predict from last token
-                            torch.cat((proj_im_tokens,q_tokens,a_tokens),dim=1), #but attend to all tokens
-                            all_att_mask,
-                            all_padding_mask)
+                        a_tokens[:, -1:],  # only the last token for prediction
+                        torch.cat((proj_im_tokens, q_tokens, a_tokens), dim=1),  # attend to all tokens
+                        all_att_mask,
+                        all_padding_mask
+                    )
                     if im_downsample is not None:
-                        level+=1
+                        level += 1
+
                 #
                 
                 #get next predicted token
                 response_decoded = self.answer_decode(ans)
-                response_decoded = F.softmax(response_decoded,dim=-1)#self.answer_softmax(response_decoded)
+                response_decoded = F.softmax(response_decoded, dim=-1)
                 self.preventSpecial(response_decoded)
                 if get_tokens:
-                    response_decoded_all = torch.cat((response_decoded_all,response_decoded),dim=1)
-
+                    response_decoded_all = torch.cat((response_decoded_all, response_decoded), dim=1)
+                    
                 if beam_search:
 
                     ###tensorized###
