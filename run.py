@@ -70,14 +70,22 @@ def main(resume, config, img_path, addToConfig=None, gpu=False, do_pad=None, sca
     if gpu:
         img = img.cuda()
 
-    # Set query to default JSON task
+    # Use default query (json>) to extract invoice data
     question = default_task_token
+
+    # Process the query once (no user interaction)
+    needs_input_mask = True
+    for q in no_mask_qs:
+        if question.startswith(q):
+            needs_input_mask = False
+            break
+
+    # Create dummy masks (no user interaction)
+    mask = torch.zeros_like(img)
+    rm_mask = torch.zeros_like(img)
+    in_img = torch.cat((img * (1 - rm_mask), mask.to(img.device)), dim=1)
 
     # Run inference
     with torch.no_grad():
-        answer, pred_mask = model(img, [[question]], RUN=True)
-        print('Extracted Invoice Data:', answer)
-
-if __name__ == '__main__':
-    # This block is not needed anymore (handled by your main script)
-    pass
+        answer, pred_mask = model(in_img, [[question]], RUN=True)
+        print('\nExtracted Invoice Data:', answer)  # Explicitly print the result
