@@ -15,198 +15,69 @@ from utils.saliency_qa import InputGradModel
 from utils import img_f
 from skimage import future
 
-def main(resume, config, img_path, addToConfig=None, gpu=False, do_pad=None, scale=None, do_saliency=False, default_task_token=None, dont_output_mask=False):
+def main(resume, config, img_path, addToConfig=None, gpu=False, do_pad=None, scale=None, do_saliency=False, default_task_token='json>', dont_output_mask=False):
     np.random.seed(1234)
     torch.manual_seed(1234)
     no_mask_qs = ['fli:', 'fna:', 're~', 'l~', 'v~', 'mm~', 'mk>', 'natural_q~', 'json>', 'json~', 'linkdown-text~', 'read_block>']
     remove_qs = ['rm>', 'mlm>', 'mm~', 'mk>']
-
-    if resume is not None:
-        checkpoint = torch.load(resume, map_location=lambda storage, location: storage)
-        print('loaded {} iteration {}'.format(checkpoint['config']['name'], checkpoint['iteration']))
-        if config is None:
-            config = checkpoint['config']
-        else:
-            config = json.load(open(config))
-        for key in config.keys():
-            if 'pretrained' in key:
-                config[key] = None
-    else:
-        checkpoint = None
-        config = json.load(open(config))
+    
+    # Load checkpoint
+    checkpoint = torch.load(resume, map_location=lambda storage, loc: storage)
+    config = checkpoint['config']
+    for key in config.keys():
+        if 'pretrained' in key:
+            config[key] = None
 
     config['optimizer_type'] = "none"
     config['trainer']['use_learning_schedule'] = False
     config['trainer']['swa'] = False
-    if not gpu:
-        config['cuda'] = False
-        config['gpu'] = None
-    else:
-        config['cuda'] = True
-        config['gpu'] = gpu
+    config['cuda'] = gpu
+    config['gpu'] = gpu
 
-    if checkpoint is not None:
-        if 'swa_state_dict' in checkpoint and checkpoint['iteration'] > config['trainer']['swa_start']:
-            state_dict = checkpoint['swa_state_dict']
-            new_state_dict = {key[7:]: value for key, value in state_dict.items() if key.startswith('module.')}
-            print('Loading SWA model')
-        else:
-            state_dict = checkpoint['state_dict']
-            new_state_dict = {
-                (key[7:] if key.startswith('module.') else key): value for key, value in state_dict.items()
-            }
-        config['model']['init_from_pretrained'] = False
-        model = eval(config['arch'])(config['model'])
-        model.load_state_dict(new_state_dict)
-    else:
-        model = eval(config['arch'])(config['model'])
-
+    # Load model
+    state_dict = checkpoint['state_dict']
+    new_state_dict = {key[7:]: value for key, value in state_dict.items() if key.startswith('module.')}
+    model = eval(config['arch'])(config['model'])
+    model.load_state_dict(new_state_dict)
     model.eval()
     if gpu:
         model = model.cuda()
 
-    if do_pad is not None:
-        do_pad = do_pad.split(',')
-        if len(do_pad) == 1:
-            do_pad += do_pad
-        do_pad = [int(p) for p in do_pad]
-    else:
-        do_pad = config['model']['image_size']
-        if type(do_pad) is int:
-            do_pad = (do_pad, do_pad)
+    # Image preprocessing
+    img = img_f.imread(img_path, False)
+    if img.max() <= 1:
+        img *= 255
 
-    if default_task_token is not None:
-        print('Using default task token: {}'.format(default_task_token))
+    # Resize/pad image
+    do_pad = config['model']['image_size']
+    if type(do_pad) is int:
+        do_pad = (do_pad, do_pad)
+    if img.shape[0] != do_pad[0] or img.shape[1] != do_pad[1]:
+        diff_x = do_pad[1] - img.shape[1]
+        diff_y = do_pad[0] - img.shape[0]
+        p_img = np.zeros(do_pad, dtype=img.dtype)
+        if diff_x >= 0 and diff_y >= 0:
+            p_img[diff_y // 2:p_img.shape[0] - (diff_y // 2 + diff_y % 2),
+                  diff_x // 2:p_img.shape[1] - (diff_x // 2 + diff_x % 2)] = img
+        else:
+            p_img = img[(-diff_y) // 2:-((-diff_y) // 2 + (-diff_y) % 2),
+                        (-diff_x) // 2:-((-diff_x) // 2 + (-diff_x) % 2)]
+        img = p_img
 
+    # Convert to tensor
+    img = img.transpose([2, 0, 1])[None, ...]
+    img = 1.0 - torch.from_numpy(img.astype(np.float32)) / 128.0
+    if gpu:
+        img = img.cuda()
+
+    # Set query to default JSON task
+    question = default_task_token
+
+    # Run inference
     with torch.no_grad():
-        if img_path is None:
-            raise ValueError("Image path must be provided.")
-        
-        img = img_f.imread(img_path, False)
-        if img.max() <= 1:
-            img *= 255
-
-        if 'rescale_to_crop_size_first' in config['data_loader'] and config['data_loader']['rescale_to_crop_size_first']:
-            scale_height = do_pad[0] / img.shape[0]
-            scale_width = do_pad[1] / img.shape[1]
-            choosen_scale = min(scale_height, scale_width)
-            if scale:
-                new_scale = scale * choosen_scale
-            else:
-                new_scale = choosen_scale
-        else:
-            new_scale = scale
-
-        if new_scale:
-            img = img_f.resize(img, fx=new_scale, fy=new_scale)
-
-        if do_pad and (img.shape[0] != do_pad[0] or img.shape[1] != do_pad[1]):
-            diff_x = do_pad[1] - img.shape[1]
-            diff_y = do_pad[0] - img.shape[0]
-            p_img = np.zeros(do_pad, dtype=img.dtype)
-            if diff_x >= 0 and diff_y >= 0:
-                p_img[diff_y // 2:p_img.shape[0] - (diff_y // 2 + diff_y % 2), diff_x // 2:p_img.shape[1] - (diff_x // 2 + diff_x % 2)] = img
-            elif diff_x < 0 and diff_y >= 0:
-                p_img[diff_y // 2:p_img.shape[0] - (diff_y // 2 + diff_y % 2), :] = img[:, (-diff_x) // 2:-((-diff_x) // 2 + (-diff_x) % 2)]
-            elif diff_x >= 0 and diff_y < 0:
-                p_img[:, diff_x // 2:p_img.shape[1] - (diff_x // 2 + diff_x % 2)] = img[(-diff_y) // 2:-((-diff_y) // 2 + (-diff_y) % 2), :]
-            else:
-                p_img = img[(-diff_y) // 2:-((-diff_y) // 2 + (-diff_y) % 2), (-diff_x) // 2:-((-diff_x) // 2 + (-diff_x) % 2)]
-            img = p_img
-
-        if len(img.shape) == 2:
-            img = img[..., None]  # Add color channel
-
-        np_img = img
-        img = img.transpose([2, 0, 1])[None, ...]
-        img = img.astype(np.float32)
-        img = torch.from_numpy(img)
-        img = 1.0 - img / 128.0
-        if gpu:
-            img = img.cuda()
-
-        # Use default task token (json>) to avoid user input
-        question = default_task_token or 'json>'
-
-        needs_input_mask = True
-        for q in no_mask_qs:
-            if question.startswith(q):
-                needs_input_mask = False
-                break
-
-        needs_remove_mask = False
-        for q in remove_qs:
-            if question.startswith(q):
-                needs_remove_mask = True
-                break
-
-        if needs_input_mask:
-            mask = torch.zeros_like(img)
-        else:
-            mask = torch.zeros_like(img)
-
-        if needs_remove_mask:
-            rm_mask = torch.zeros_like(img)
-            mask = torch.where(rm_mask == 1, torch.FloatTensor(*mask.size()).fill_(-1).to(img.device), mask)
-            rm_img = img * (1 - rm_mask)
-        else:
-            rm_img = img
-
-        in_img = torch.cat((rm_img, mask.to(img.device)), dim=1)
-
-        answer, pred_mask = model(in_img, [[question]], RUN=True)
-        print('Answer:', answer)
-
-        if not dont_output_mask:
-            draw_img = 0.5 * (1 - img)
-            threshed = torch.where(pred_mask > 0.5, 1 - draw_img, draw_img)
-            show_im = torch.cat((draw_img, draw_img * (1 - pred_mask), threshed), dim=1)
-            show_im = (show_im[0] * 255).cpu().permute(1, 2, 0).numpy().astype(np.uint8)
-            img_f.imshow('x', show_im)
-            img_f.show()
-
+        answer, pred_mask = model(img, [[question]], RUN=True)
+        print('Extracted Invoice Data:', answer)
 
 if __name__ == '__main__':
-    logger = logging.getLogger()
-    parser = argparse.ArgumentParser(description='Run QA model on image(s)')
-    parser.add_argument('-c', '--checkpoint', default=None, type=str,
-                        help='Path to latest checkpoint (default: None)')
-    parser.add_argument('-i', '--image', default=None, type=str,
-                        help='Path to image (default: prompt)')
-    parser.add_argument('-g', '--gpu', default=None, type=int,
-                        help='GPU number (default: CPU only)')
-    parser.add_argument('-p', '--pad', default=None, type=str,
-                        help='Pad image to this size (square)')
-    parser.add_argument('-s', '--scale', default=None, type=float,
-                        help='Scale image by this amount')
-    parser.add_argument('-f', '--config', default=None, type=str,
-                        help='Config override')
-    parser.add_argument('-a', '--addtoconfig', default=None, type=str,
-                        help='Arbitrary key-value pairs to add to config of the form "k1=v1,k2=v2,...kn=vn". You can nest keys with k1=k2=k3=v')
-    parser.add_argument('-S', '--saliency', default=False, action='store_const', const=True,
-                        help='Run to get saliency map')
-    parser.add_argument('-D', '--dont_output_mask', default=False, action='store_const', const=True,
-                        help="Don't show output mask")
-    parser.add_argument('-t', '--task_token', default=None, type=str,
-                        help='Set a default task token that gets appended if no other task token is in query')
-    args = parser.parse_args()
-
-    addtoconfig = []
-    if args.addtoconfig is not None:
-        split = args.addtoconfig.split(',')
-        for kv in split:
-            split2 = kv.split('=')
-            addtoconfig.append(split2)
-
-    config = None
-    if args.checkpoint is None and args.config is None:
-        print('Must provide checkpoint (with -c)')
-        exit()
-
-    if args.gpu is not None:
-        with torch.cuda.device(args.gpu):
-            main(args.checkpoint, args.config, args.image, addtoconfig, True, do_pad=args.pad, scale=args.scale,
-                 do_saliency=args.saliency, default_task_token=args.task_token, dont_output_mask=args.dont_output_mask)
-    else:
-        main(args.checkpoint, args.config, args.image, addtoconfig, do_pad=args.pad, scale=args.scale,
-             do_saliency=args.saliency, default_task_token=args.task_token, dont_output_mask=args.dont_output_mask)
+    # This block is not needed anymore (handled by your main script)
+    pass
