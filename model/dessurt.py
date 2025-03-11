@@ -487,7 +487,7 @@ class Dessurt(BaseModel):
                 iteration += 1
                 if iteration > max_iterations:
                     print("WARNING: Maximum iteration count reached. Terminating decoding loop.")
-                break
+                    break
 
 
             if beam_search:
